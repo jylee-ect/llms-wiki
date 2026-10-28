@@ -3,6 +3,7 @@
 data/
   AGENTS.md      위키 작성 규칙(스키마) — 사람이 편집
   raw/           원본 문서 — 수정하지 않음
+  lint/<id>.json 점검 결과 — 실행 1회당 1파일
   wiki/
     index.md     목차 — 페이지 메타데이터로 자동 생성
     log.md       작업 이력 — append-only
@@ -10,6 +11,7 @@ data/
 """
 import json
 import re
+import secrets
 import shutil
 import threading
 from dataclasses import dataclass, field
@@ -29,6 +31,10 @@ TYPE_LABELS = {
 RESERVED_SLUGS = {"index", "log"}
 LINK_RE = re.compile(r"\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]")
 DEFAULT_SCHEMA = Path(__file__).with_name("default_schema.md")
+
+LINT_SCHEMA_VERSION = 1
+LINT_RUN_ID_RE = re.compile(r"^\d{8}-\d{6}-[0-9a-f]{6}$")
+LINT_SUMMARY_KEYS = ("id", "created_at", "model", "effort", "checked_pages", "total_pages", "counts")
 
 # 쓰기 작업(ingest/저장/로그)을 직렬화한다. 단일 프로세스 전제.
 lock = threading.RLock()
@@ -127,6 +133,7 @@ def _page_path(slug: str) -> Path:
 def init() -> None:
     settings.raw_dir.mkdir(parents=True, exist_ok=True)
     settings.wiki_dir.mkdir(parents=True, exist_ok=True)
+    settings.lint_dir.mkdir(parents=True, exist_ok=True)
     if not settings.schema_path.exists():
         shutil.copyfile(DEFAULT_SCHEMA, settings.schema_path)
     if not (settings.wiki_dir / "log.md").exists():
@@ -219,6 +226,42 @@ def read_schema() -> str:
 def write_schema(content: str) -> None:
     with lock:
         _write_atomic(settings.schema_path, content)
+
+
+# ---------- 점검 결과 ----------
+
+def new_lint_run_id() -> tuple[str, str]:
+    """(id, created_at) — id는 시각순 정렬이 되도록 타임스탬프로 시작한다."""
+    at = datetime.now().astimezone()
+    return f"{at:%Y%m%d-%H%M%S}-{secrets.token_hex(3)}", at.isoformat(timespec="seconds")
+
+
+def save_lint_run(record: dict) -> None:
+    with lock:
+        settings.lint_dir.mkdir(parents=True, exist_ok=True)
+        text = json.dumps(record, ensure_ascii=False, indent=2) + "\n"
+        _write_atomic(settings.lint_dir / f"{record['id']}.json", text)
+
+
+def get_lint_run(run_id: str) -> dict | None:
+    if not LINT_RUN_ID_RE.match(run_id):
+        return None
+    path = settings.lint_dir / f"{run_id}.json"
+    if not path.is_file():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def list_lint_runs() -> list[dict]:
+    """최신순 요약 목록. 읽을 수 없는 파일은 건너뛴다."""
+    runs = []
+    for path in sorted(settings.lint_dir.glob("*.json"), reverse=True):
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        runs.append({key: record.get(key) for key in LINT_SUMMARY_KEYS})
+    return runs
 
 
 # ---------- 원본 ----------

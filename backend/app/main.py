@@ -146,3 +146,16 @@ def save_answer(body: SaveAnswerRequest):
 def lint(body: LLMChoice | None = None):
     body = body or LLMChoice()
     return wiki.lint(resolve_options(body.model, body.effort))
+
+
+@app.get("/lint/runs")
+def list_lint_runs():
+    return store.list_lint_runs()
+
+
+@app.get("/lint/runs/{run_id}")
+def get_lint_run(run_id: str):
+    record = store.get_lint_run(run_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"점검 기록이 없습니다: {run_id}")
+    return record

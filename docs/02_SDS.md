@@ -2,7 +2,7 @@
 
 | 항목 | 내용 |
 |---|---|
-| 문서 버전 | 1.0 (2026-10-26) |
+| 문서 버전 | 1.1 (2026-10-28) — 점검 결과 JSON 저장 (5.9, 7.4, 9.2, 10.3) |
 | 요구사항 | [01_SRS.md](01_SRS.md) |
 | 원칙 | 이 문서만 보고 같은 동작의 코드를 다시 만들 수 있어야 한다. 프롬프트·스키마·파일 형식은 **원문 그대로** 싣는다 |
 
@@ -22,7 +22,7 @@
                                             │   └─ errors.py  InputError / LLMError      │
                                             └──────────────────────┬────────────────────┘
                                                                    ▼
-                                            data/ (AGENTS.md, raw/, wiki/index.md, wiki/log.md, wiki/*.md)
+                                            data/ (AGENTS.md, raw/, lint/*.json, wiki/index.md, wiki/log.md, wiki/*.md)
 ```
 
 계층별 책임:
@@ -113,7 +113,7 @@ llm_wiki/
 | `max_query_pages` | `MAX_QUERY_PAGES` | `8` |
 | `max_upload_bytes` | `MAX_UPLOAD_MB` | `20` → ×1024×1024 |
 
-파생 속성(property): `raw_dir = data_dir/"raw"`, `wiki_dir = data_dir/"wiki"`, `schema_path = data_dir/"AGENTS.md"`.
+파생 속성(property): `raw_dir = data_dir/"raw"`, `wiki_dir = data_dir/"wiki"`, `lint_dir = data_dir/"lint"`, `schema_path = data_dir/"AGENTS.md"`.
 모듈 끝에서 `settings = Settings()` 싱글턴을 만든다.
 
 모델 카탈로그 (`MODELS`, 순서 유지):
@@ -140,6 +140,7 @@ MODELS = {
 data/
 ├─ AGENTS.md          작성 규칙. 없으면 default_schema.md를 복사해서 만든다
 ├─ raw/<원본파일명>   업로드 원본 (바이트 그대로)
+├─ lint/<id>.json     점검 결과. 실행 1회당 1파일 (5.9)
 └─ wiki/
    ├─ index.md        목차 (자동 생성, 직접 수정 금지)
    ├─ log.md          작업 로그 (append-only). 초기 내용: "# 작업 로그\n"
@@ -292,6 +293,55 @@ name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", Path(filename).name).strip(" .") or
 - 한 페이지는 한 대상/개념에 집중한다. 길어지면 하위 주제를 별도 페이지로 분리하고 링크한다.
 ```
 
+### 5.9 점검 결과 (lint/<id>.json) 형식
+
+추후 DB로 옮길 것을 전제로 한 형식이다. 실행 1회가 파일 1개(레코드 1건)다.
+
+- **id**: `YYYYMMDD-HHMMSS-<6자리 hex>`. 앞부분이 실행 시작 시각(로컬 시간)이라 파일명순 정렬이 곧 시간순이다. 뒤의 hex는 `secrets.token_hex(3)`로, 같은 초에 두 번 실행해도 충돌하지 않게 한다. 검증 정규식: `^\d{8}-\d{6}-[0-9a-f]{6}$`
+- **created_at**: 실행 **시작** 시각. `datetime.now().astimezone().isoformat(timespec="seconds")` (예: `2026-10-28T22:45:11+09:00`)
+- **duration_seconds**: 시작부터 레코드를 만들 때까지 걸린 시간 (`time.monotonic()` 차이, 소수 1자리)
+- **issues[].id**: `f"{run_id}-{n:03d}"` (n은 1부터). 지적 사항 원래 필드 앞에 붙인다
+- 직렬화: `json.dumps(record, ensure_ascii=False, indent=2) + "\n"`, UTF-8, atomic write
+
+```json
+{
+  "schema_version": 1,
+  "id": "20261028-224511-078905",
+  "created_at": "2026-10-28T22:45:11+09:00",
+  "duration_seconds": 10.1,
+  "model": "gpt-6-sol",
+  "effort": "low",
+  "checked_pages": 29,
+  "total_pages": 29,
+  "counts": {"issues": 4, "broken_links": 4, "orphans": 1},
+  "issues": [
+    {
+      "id": "20261028-224511-078905-001",
+      "kind": "contradiction",
+      "pages": ["security-incident-response", "vision-video-retention-and-export"],
+      "description": "보안사고 대응 페이지는 영상을 90일 안에 보존 처리해야 한다고 단정한다. 그러나 ...",
+      "suggestion": "..."
+    }
+  ],
+  "broken_links": [{"page": "gms", "target": "source-pangyo-research-lab-equipment"}],
+  "orphans": ["hanbit-secure"]
+}
+```
+
+키 순서는 위와 같다. 요약 목록(`list_lint_runs`)은 레코드에서 `LINT_SUMMARY_KEYS = ("id", "created_at", "model", "effort", "checked_pages", "total_pages", "counts")`만 뽑는다.
+
+DB 이관 시 테이블 대응 (참고):
+
+| 테이블 | 키 | 컬럼 출처 |
+|---|---|---|
+| `lint_runs` | `id` (PK) | schema_version, created_at, duration_seconds, model, effort, checked_pages, total_pages, counts.* |
+| `lint_issues` | `id` (PK), `run_id` (FK) | kind, description, suggestion. 이후 해결 상태(status, resolved_at 등) 컬럼 추가 |
+| `lint_issue_pages` | (`issue_id`, `slug`) | issues[].pages |
+| `lint_broken_links` | (`run_id`, `page`, `target`) | broken_links[] |
+| `lint_orphans` | (`run_id`, `slug`) | orphans[] |
+
+형식을 바꾸면 `LINT_SCHEMA_VERSION`을 올린다. 이관 스크립트는 버전별로 분기한다.
+
 ---
 
 ## 6. 모듈 설계
@@ -355,7 +405,7 @@ client.responses.create(
 
 | 함수 | 설명 |
 |---|---|
-| `init()` | raw/, wiki/ 생성. AGENTS.md, log.md, index.md가 없으면 만든다 |
+| `init()` | raw/, wiki/, lint/ 생성. AGENTS.md, log.md, index.md가 없으면 만든다 |
 | `page_exists(slug)` | 예약 slug가 아니고 파일이 있으면 True |
 | `get_page(slug)` → `Page \| None` | |
 | `list_pages()` → `list[Page]` | `wiki/*.md`를 파일명순으로 읽는다. 예약 slug는 뺀다 |
@@ -368,6 +418,10 @@ client.responses.create(
 | `read_schema()`, `write_schema(content)` | |
 | `save_raw(filename, data)` → 저장된 파일명 | 5.7 |
 | `list_sources()` → `[{name, size, added}]` | raw/ 파일 목록, `added`는 mtime |
+| `new_lint_run_id()` → `(id, created_at)` | 5.9의 id와 시작 시각 |
+| `save_lint_run(record)` | lock, lint/ 생성 후 `<id>.json` atomic write |
+| `get_lint_run(run_id)` → `dict \| None` | id 정규식이 안 맞거나 파일이 없으면 None |
+| `list_lint_runs()` → `list[dict]` | `lint/*.json`을 파일명 역순(최신순)으로 읽어 요약 키만 반환. JSON이 깨진 파일은 건너뜀 |
 | `now()`, `today()` | |
 
 - `lock = threading.RLock()`. 재진입 가능해야 한다 (ingest가 lock을 잡은 상태에서 write_page, append_log가 다시 잡는다).
@@ -474,6 +528,7 @@ save_answer(question, answer, title=None)
 
 ```
 lint(opts)
+  run_id, created_at = new_lint_run_id();  started = time.monotonic()
   pages = list_pages();  existing = {slug}
   broken  = [{"page": p.slug, "target": t} for p in pages for t in p.links if t not in existing]
   orphans = [p.slug for p in pages if p.slug not in (모든 페이지 links의 합집합)]
@@ -481,10 +536,15 @@ lint(opts)
     블록 = '<page slug="..">\n{to_markdown()}</page>'를 순서대로 쌓다가
            (이미 블록이 하나 이상 있고) 누적 길이가 MAX_LINT_CHARS를 넘으면 중단
     issues = complete_json(opts, LINT_INSTR, "\n\n".join(블록), LINT_SCHEMA, "lint")["issues"]
+  record = 5.9 형식 (issues마다 id 부여, duration_seconds = monotonic 차이)
+  save_lint_run(record)
   append_log("lint", f"페이지 {checked}/{total}개 점검",
-             [f"LLM 지적 {n}건", f"깨진 링크 {n}건", f"고아 페이지 {n}개", f"모델: ..."])
-  return {issues, broken_links, orphans, checked_pages, total_pages, model, effort}
+             [f"LLM 지적 {n}건", f"깨진 링크 {n}건", f"고아 페이지 {n}개", f"모델: ...",
+              f"결과: lint/{run_id}.json"])
+  return record
 ```
+
+LLM 호출이 실패하면 예외가 그대로 올라가므로 레코드는 저장되지 않는다.
 
 ---
 
@@ -669,7 +729,9 @@ class SchemaUpdate(BaseModel):
 | `POST /ingest/text` | `TextIngest` | ingest 결과 |
 | `POST /query` | `QueryRequest` | `{answer, pages, model, effort}` |
 | `POST /query/save` | `SaveAnswerRequest` | `Page.meta()` |
-| `POST /lint` | `LLMChoice` (본문 생략 가능) | 7.4의 반환값 |
+| `POST /lint` | `LLMChoice` (본문 생략 가능) | 5.9 레코드 (저장된 것과 동일) |
+| `GET /lint/runs` | — | `[{id, created_at, model, effort, checked_pages, total_pages, counts}]` 최신순. 기록이 없으면 `[]` |
+| `GET /lint/runs/{run_id}` | — | 5.9 레코드 · 404 `"점검 기록이 없습니다: {run_id}"` |
 
 `/ingest/file` 처리 순서: `resolve_options` → `file.file.read(max_upload_bytes + 1)` → 크기 초과 시 413 → `wiki.ingest_file(opts, file.filename or "upload.txt", data)`.
 
@@ -721,7 +783,7 @@ st.set_page_config(page_title="LLM Wiki", page_icon="📚", layout="wide")
 | 질문 | `session_state["messages"]` 목록 `{role, content, pages?, question?, model?, effort?, saved?}`을 `st.chat_message`로 그린다. 어시스턴트 메시지에는 `🤖 {label} · effort {effort}` caption, "참고한 페이지 N개" expander(slug 버튼 → `open_page`), 저장 버튼(`POST /query/save` 후 `saved=slug`, rerun) 또는 "✅ 위키에 저장됨". `st.chat_input` → 사용자 메시지 추가 → spinner와 함께 `POST /query {question, **llm_choice}` → 어시스턴트 메시지 추가 → `st.rerun()`. 메시지가 있으면 "대화 지우기" 버튼 |
 | 문서 추가 | 사용 모델 caption. `st.file_uploader(type=health 확장자에서 '.' 제거, accept_multiple_files=True)`. "위키에 반영" 버튼을 누르면 파일마다 `st.status`를 띄우고 `POST /ingest/file`(files + `data=llm_choice`)을 호출해 제목, log 목록, 생성·수정 수, 잘림 경고를 보여준다. expander 안의 `st.form(clear_on_submit=True)`에 제목·내용을 입력하면 `POST /ingest/text`. 아래에 `GET /sources`를 `st.dataframe`으로 표시 |
 | 위키 | 페이지가 없으면 안내. 있으면 `columns([1, 3])`. 왼쪽: 검색어, 유형 multiselect, 필터 결과 `st.radio(key="selected_page", format_func="[유형] 제목")`. 선택된 페이지가 필터 결과에 없으면 목록 맨 앞에 넣고, 선택이 없거나 잘못됐으면 첫 항목으로. 오른쪽: `## 제목`, caption(slug · 유형 · 갱신일 · 원본), `render_links(body)`, divider, "연결된 페이지"/"이 페이지를 참조하는 페이지" 버튼(4열, 없는 slug는 `⚠️ slug (없음)` 비활성). 아래에 "목차 원문 (index.md)" expander(`st.code(language="markdown")`) |
-| 점검 | 사용 모델 caption. "점검 실행" → `POST /lint json=llm_choice` 결과를 `session_state["lint"]`에 저장. metric 3개, 부분 점검 경고, 문제마다 `st.container(border=True)`(`` **`kind`** — 설명 ``, `💡 제안`, 관련 페이지), 깨진 링크 dataframe, 고아 페이지 목록 |
+| 점검 | 사용 모델 caption. "점검 실행" → `POST /lint json=llm_choice`가 성공하면 `session_state["lint_run_id"] = result["id"]`. 이어서 `GET /lint/runs`를 호출하고, 비어 있으면 `st.info("아직 점검 기록이 없습니다.")`. 있으면 `session_state["lint_run_id"]`가 목록에 없을 때 최신 id로 설정한 뒤 `st.selectbox("점검 기록 (최신순)", key="lint_run_id")`를 그린다. 라벨은 `"YYYY-MM-DD HH:MM · {모델 label}({effort}) · 지적 n · 깨진 링크 n · 고아 n"`. 선택한 id로 `GET /lint/runs/{id}`. 결과 위에 `columns([4, 1])`: caption `` 저장 위치: `data/lint/{id}.json` · 소요 {duration_seconds}초 `` + `st.download_button("JSON 다운로드", file_name=f"lint-{id}.json", mime="application/json")`. 그 아래 metric 3개, 부분 점검 경고, 문제마다 `st.container(border=True)`(`` **`kind`** — 설명 ``, `💡 제안`, 관련 페이지), 깨진 링크 dataframe, 고아 페이지 목록 |
 | 로그 | `GET /log`를 `render_links` 후 `st.markdown` |
 | 규칙 | `GET /schema`를 `st.form` 안의 `text_area(height=500)`에 넣고, 저장하면 `PUT /schema` |
 

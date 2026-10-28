@@ -1,4 +1,6 @@
 """LLM Wiki의 세 가지 동작: ingest, query, lint."""
+import time
+
 from . import llm, store
 from .config import settings
 from .errors import InputError
@@ -266,6 +268,9 @@ def save_answer(question: str, answer: str, title: str | None = None) -> dict:
 # ---------- lint ----------
 
 def lint(opts: LLMOptions) -> dict:
+    """점검 후 결과를 data/lint/<id>.json에 저장하고 그 레코드를 반환한다."""
+    run_id, created_at = store.new_lint_run_id()
+    started = time.monotonic()
     pages = store.list_pages()
     existing = {p.slug for p in pages}
     broken = [{"page": p.slug, "target": t} for p in pages for t in p.links if t not in existing]
@@ -284,6 +289,21 @@ def lint(opts: LLMOptions) -> dict:
         checked = len(blocks)
         issues = llm.complete_json(opts, LINT_INSTR, "\n\n".join(blocks), LINT_SCHEMA, "lint")["issues"]
 
+    record = {
+        "schema_version": store.LINT_SCHEMA_VERSION,
+        "id": run_id,
+        "created_at": created_at,
+        "duration_seconds": round(time.monotonic() - started, 1),
+        "model": opts.model,
+        "effort": opts.effort,
+        "checked_pages": checked,
+        "total_pages": len(pages),
+        "counts": {"issues": len(issues), "broken_links": len(broken), "orphans": len(orphans)},
+        "issues": [{"id": f"{run_id}-{n:03d}", **issue} for n, issue in enumerate(issues, 1)],
+        "broken_links": broken,
+        "orphans": orphans,
+    }
+    store.save_lint_run(record)
     store.append_log(
         "lint",
         f"페이지 {checked}/{len(pages)}개 점검",
@@ -292,14 +312,7 @@ def lint(opts: LLMOptions) -> dict:
             f"깨진 링크 {len(broken)}건",
             f"고아 페이지 {len(orphans)}개",
             f"모델: {opts.describe()}",
+            f"결과: lint/{run_id}.json",
         ],
     )
-    return {
-        "issues": issues,
-        "broken_links": broken,
-        "orphans": orphans,
-        "checked_pages": checked,
-        "total_pages": len(pages),
-        "model": opts.model,
-        "effort": opts.effort,
-    }
+    return record

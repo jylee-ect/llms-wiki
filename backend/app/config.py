@@ -49,6 +49,10 @@ class Settings:
         return self.data_dir / "wiki"
 
     @property
+    def lint_dir(self) -> Path:
+        return self.data_dir / "lint"
+
+    @property
     def schema_path(self) -> Path:
         return self.data_dir / "AGENTS.md"
 

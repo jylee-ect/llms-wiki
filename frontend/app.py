@@ -1,3 +1,4 @@
+import json
 import os
 import re
 
@@ -268,10 +269,38 @@ with tab_lint:
     st.caption(f"사용 모델: **{models[model]['label']}** · effort **{effort}** (사이드바에서 변경)")
     if st.button("점검 실행", type="primary"):
         with st.spinner("위키 전체를 읽는 중..."):
-            st.session_state["lint"] = api("POST", "/lint", timeout=LLM_TIMEOUT, json=llm_choice)
+            result = api("POST", "/lint", timeout=LLM_TIMEOUT, json=llm_choice)
+        if result:
+            st.session_state["lint_run_id"] = result["id"]
 
-    report = st.session_state.get("lint")
+    runs = api("GET", "/lint/runs") or []
+    report = None
+    if not runs:
+        st.info("아직 점검 기록이 없습니다.")
+    else:
+        run_labels = {
+            r["id"]: f"{r['created_at'][:16].replace('T', ' ')} · "
+            f"{models.get(r['model'], {}).get('label', r['model'])}({r['effort']}) · "
+            f"지적 {r['counts']['issues']} · 깨진 링크 {r['counts']['broken_links']} · 고아 {r['counts']['orphans']}"
+            for r in runs
+        }
+        if st.session_state.get("lint_run_id") not in run_labels:
+            st.session_state["lint_run_id"] = runs[0]["id"]
+        run_id = st.selectbox("점검 기록 (최신순)", list(run_labels), format_func=run_labels.get, key="lint_run_id")
+        report = api("GET", f"/lint/runs/{run_id}")
+
     if report:
+        info, download = st.columns([4, 1])
+        info.caption(
+            f"저장 위치: `data/lint/{report['id']}.json` · 소요 {report['duration_seconds']}초"
+        )
+        download.download_button(
+            "JSON 다운로드",
+            json.dumps(report, ensure_ascii=False, indent=2),
+            file_name=f"lint-{report['id']}.json",
+            mime="application/json",
+            width="stretch",
+        )
         c1, c2, c3 = st.columns(3)
         c1.metric("LLM 지적 사항", len(report["issues"]))
         c2.metric("깨진 링크", len(report["broken_links"]))

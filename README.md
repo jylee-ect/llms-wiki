@@ -81,6 +81,7 @@ Streamlit **사이드바**에서 모델과 reasoning effort를 고를 수 있습
 data/
 ├─ AGENTS.md        위키 작성 규칙(스키마). 사람이 편집 → LLM이 따름
 ├─ raw/             원본 문서. 수정하지 않음
+├─ lint/<id>.json   점검 결과. 실행할 때마다 1파일 (추후 DB 이관 전제, docs/02_SDS.md 5.9)
 └─ wiki/
    ├─ index.md      목차. 페이지 메타데이터로 자동 생성
    ├─ log.md        작업 이력 (append-only)
@@ -96,9 +97,9 @@ data/
 | Ingest | `POST /ingest/file`, `POST /ingest/text` | ① 목차를 보고 갱신할 기존 페이지 선택 → ② 원본 + 기존 페이지를 주고 페이지 생성·갱신 (JSON 구조화 출력) → ③ index 재생성, log 기록 |
 | Query | `POST /query` | ① 목차에서 관련 페이지 선택 → ② 그 페이지를 근거로 `[[slug]]` 인용과 함께 답변 |
 | Save | `POST /query/save` | 좋은 답변을 `analysis` 페이지로 위키에 저장 |
-| Lint | `POST /lint` | LLM: 모순·오래된 정보·빠진 페이지/링크·중복 / 코드: 깨진 링크·고아 페이지 |
+| Lint | `POST /lint` | LLM: 모순·오래된 정보·빠진 페이지/링크·중복 / 코드: 깨진 링크·고아 페이지. 결과는 `data/lint/<id>.json`에 저장 |
 
-조회용: `GET /health`, `/pages`, `/pages/{slug}`, `/index`, `/log`, `/sources`, `GET·PUT /schema`
+조회용: `GET /health`, `/models`, `/pages`, `/pages/{slug}`, `/index`, `/log`, `/sources`, `/lint/runs`, `/lint/runs/{id}`, `GET·PUT /schema`
 
 지원 형식: pdf, docx, txt, md, csv, json, html, xml, log (스캔 PDF는 OCR 미지원)
 
